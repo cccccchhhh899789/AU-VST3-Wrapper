@@ -23,14 +23,20 @@ jobs:
           # 即 JUCE 必须位于仓库同级目录
           git clone --depth 1 --branch 9.0.5 https://github.com/juce-framework/JUCE.git "$GITHUB_WORKSPACE/../JUCE"
 
-      - name: Fix juce_audio_processors_headless module path
+      - name: Fix module paths in .jucer files
         run: |
-          # 该模块在三个 .jucer 里写的是 ../../../JUCE/modules（多一层），统一修正
+          # 修正 1：juce_audio_processors_headless 路径多写了一层 ../../../ → ../../
+          # 修正 2：11/13 个模块标了 useGlobalPath="1"（走 Projucer 全局设置，
+          #         CI 上为空 → resave 报 "module paths is invalid"），
+          #         全部改 0，强制使用 .jucer 自带的 MODULEPATH 相对路径
           for f in */*.jucer; do
             sed -i '' 's|path="../../../JUCE/modules"|path="../../JUCE/modules"|' "$f"
+            sed -i '' 's|useGlobalPath="1"|useGlobalPath="0"|g' "$f"
             echo "patched: $f"
           done
-          grep -h 'juce_audio_processors_headless' */*.jucer | head -3
+          echo "--- verify (should all be ../../JUCE/modules and useGlobalPath=0) ---"
+          grep -o 'path="[^"]*JUCE/modules"' */*.jucer | sort -u
+          grep -c 'useGlobalPath="1"' */*.jucer || echo "no useGlobalPath=1 left"
 
       - name: Build Projucer
         run: |
