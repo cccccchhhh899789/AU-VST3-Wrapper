@@ -1,0 +1,84 @@
+name: build-au
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: Clone JUCE 9.0.5
+        run: |
+          # .jucer 里模块路径是相对 .jucer 所在子目录的 ../../JUCE/modules，
+          # 即 JUCE 必须位于仓库同级目录
+          git clone --depth 1 --branch 9.0.5 https://github.com/juce-framework/JUCE.git "$GITHUB_WORKSPACE/../JUCE"
+
+      - name: Fix juce_audio_processors_headless module path
+        run: |
+          # 该模块在三个 .jucer 里写的是 ../../../JUCE/modules（多一层），统一修正
+          for f in */*.jucer; do
+            sed -i '' 's|path="../../../JUCE/modules"|path="../../JUCE/modules"|' "$f"
+            echo "patched: $f"
+          done
+          grep -h 'juce_audio_processors_headless' */*.jucer | head -3
+
+      - name: Build Projucer
+        run: |
+          xcodebuild -project "$GITHUB_WORKSPACE/../JUCE/extras/Projucer/Builds/MacOSX/Projucer.xcodeproj" \
+            -configuration Release build -quiet
+          PROJUCER=$(find "$GITHUB_WORKSPACE/../JUCE/extras/Projucer" -type f -path "*MacOSX*" -name Projucer | head -1)
+          test -n "$PROJUCER" || { echo "Projucer binary not found"; exit 1; }
+          echo "PROJUCER=$PROJUCER" >> "$GITHUB_ENV"
+          "$PROJUCER" --version || true
+
+      - name: Resave .jucer projects
+        run: |
+          for f in */*.jucer; do
+            echo "=== resave $f ==="
+            "$PROJUCER" --resave "$f"
+          done
+
+      - name: Build AU plug-ins
+        run: |
+          for d in "MIDI Effect" "Instrument" "Audio Effect"; do
+            echo "=== build $d ==="
+            xcodebuild -project "$d"/Builds/MacOSX/*.xcodeproj \
+              -configuration Release build \
+              ARCHS="x86_64 arm64" ONLY_ACTIVE_ARCH=NO \
+              CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO \
+              -quiet
+          done
+
+      - name: Collect .component bundles
+        run: |
+          mkdir -p out
+          find . -name "*.component" -type d -not -path "./out/*" -exec cp -R {} out/ \;
+          ls -la out/
+          # 断言：必须含本机 x86_64 切片
+          for bin in out/*.component/Contents/MacOS/*; do
+            echo "--- $bin"
+            lipo -archs "$bin"
+            lipo -archs "$bin" | grep -q x86_64 || { echo "MISSING x86_64"; exit 1; }
+          done
+          # 打印 AU 注册信息，供本地 auval 对照
+          for p in out/*.component/Contents/Info.plist; do
+            echo "=== $p ==="
+            plutil -p "$p" | grep -A6 AudioComponents || plutil -p "$p" | head -40
+          done
+          zip -r au-components.zip out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: au-components
+          path: au-components.zip
+          if-no-files-found: error
